@@ -19,25 +19,28 @@
     "build": "rimraf dist/ && tsup src/main.ts --dts --splitting --format esm,cjs",
     "build-dev": "npm run build -- --sourcemap",
     "build-dev:watch": "npm run build-dev -- --watch",
-    "test": "jest --detectOpenHandles --forceExit"
+    "test": "NODE_DEBUG=gc node --expose-gc --max-old-space-size=512 --gc-interval=100 $(which jest) --detectOpenHandles --verbose --runInBand",
+    "test:debug": "NODE_DEBUG=gc,net node --inspect-brk --expose-gc $(which jest) --runInBand",
+    "test:memory": "NODE_DEBUG=gc node --expose-gc --trace-gc --max-old-space-size=512 $(which jest) --detectOpenHandles --runInBand",
+    "test:fast": "jest --runInBand --forceExit",
+    "test:ci": "jest --ci --runInBand --forceExit",
+    "test:watch": "jest --watch --runInBand",
+    "test:leak": "NODE_DEBUG=gc node --expose-gc --trace-gc --trace-gc-verbose scripts/memory-usage.js",
+    "test:heap": "NODE_DEBUG=gc node --expose-gc --heap-prof --heap-prof-interval=128 $(which jest) --runInBand"
   },
   "author": "Stan Wohlwend <n2d4xc@gmail.com>",
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^20.12.2",
-    "rimraf": "^5.0.5",
-    "tsup": "^8.0.2",
-    "typescript": "^5.4.3",
-    "jest": "*",
     "@swc/core": "*",
     "@swc/jest": "*",
     "@types/jest": "*",
+    "@types/node": "^20.12.2",
     "@types/pg": "*",
-    "pg": "*"
-  },
-  "jest": {
-    "transform": {
-      "^.+\\.(t|j)sx?$": "@swc/jest"
-    }
+    "jest": "*",
+    "pg": "*",
+    "postgres": "^3.4.5",
+    "rimraf": "^5.0.5",
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.3"
   }
 }
