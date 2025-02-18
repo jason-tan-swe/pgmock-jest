@@ -1,9 +1,11 @@
+import { type Server } from "net";
 import { Ipv4Address } from "./addresses/ip-address.js";
 import { bootEmulator, sendScript } from "./boot.js";
 import { NodePostgresConnector } from "./connectors/node-postgres.js";
 import { PostgresConnectionSocket } from "./connectors/sockets.js";
 import { Logger } from "./logger.js";
 import { NetworkAdapter } from "./network-adapter.js";
+import net from "net"
 
 export type SerialConsole = {
   write(data: Uint8Array): void;
@@ -22,7 +24,12 @@ export type PostgresMockCreationOptions = {
 export class PostgresMock {
   private _curPort = 12400;
   private _curShellScriptId = 0;
-  private readonly _serialConsole: SerialConsole;
+  private _serialConsole: SerialConsole | null;
+  private server: Server | undefined;
+  private listeningServer: Server | undefined;
+  private abortServer: AbortController;
+  private activeSockets: Set<net.Socket> = new Set();  // Add this line
+
 
   private constructor(
     private _emulator: {
@@ -30,11 +37,17 @@ export class PostgresMock {
       add_listener: (event: string, callback: (e: any) => void) => void,
       serial0_send: (data: string) => void,
       destroy: () => void,
+      close: () => void,
+      stop: () => void,
+      wasm_memory: any,
     } | null
   ) {
     if (!_emulator) {
       throw new Error("Must use PostgresMock.create() to create a PostgresMock instance");
     }
+
+    this.abortServer = new AbortController()
+    this.setup()
 
     this._serialConsole = {
       write: (data: Uint8Array) => {
@@ -49,6 +62,34 @@ export class PostgresMock {
         _emulator.add_listener("serial0-output-byte", callback);
       },
     };
+  }
+
+  private async setup() {
+    this.server = net.createServer((socket) => {
+      this.activeSockets.add(socket);  // Track socket
+      const pgSocket = this.createSocket();
+      pgSocket.connect();
+      
+      socket.on("data", (data) => {
+        pgSocket.write(data);
+      });
+      pgSocket.on("data", (data) => {
+        socket.write(data);
+      });
+      socket.on("error", () => {
+        this.activeSockets.delete(socket);  // Remove tracked socket
+        socket.destroy();
+        pgSocket.destroy();
+      });
+      socket.on("close", () => {
+        this.activeSockets.delete(socket);  // Remove tracked socket
+        pgSocket.destroy();
+      });
+    });
+
+    this.server.on("error", (err) => {
+      console.error("Server error:", err);
+    });
   }
 
   /**
@@ -114,20 +155,13 @@ export class PostgresMock {
     }
     Logger.log("Dependencies imported");
     
-    const server = net.createServer((socket) => {
-      const pgSocket = this.createSocket();
-      pgSocket.connect();
-      socket.on("data", (data) => {
-        pgSocket.write(data);
-      });
-      pgSocket.on("data", (data) => {
-        socket.write(data);
-      });
-    });
     Logger.log("pgmock server created");
-  
-    await new Promise<void>(resolve => server.listen(port, resolve));
-    const actualPort = (server.address() as any).port;
+
+    this.listeningServer = this!.server!.listen({ 
+      port,
+      signal: this.abortServer.signal
+     })
+    const actualPort = (this.server!.address() as any).port;
     Logger.log("pgmock server listening on port", actualPort);
 
     return `postgresql://postgres:pgmock@localhost:${actualPort}`;
@@ -216,14 +250,54 @@ export class PostgresMock {
     Logger.log("Assigning new port", this._curPort);
     return this._curPort++;
   }
-
-  public destroy() {
+  public async destroy() {
     if (!this._emulator) {
       throw new Error("Postgres emulator has already been destroyed!");
     }
+    
+    console.log("\n=== PostgresMock Destroy Start ===");
 
-    Logger.log("Destroying PostgresMock.");
-    this._emulator.destroy();
-    this._emulator = null;
+    // Close servers first
+    await Promise.all([
+      this.server?.close(),
+      this.listeningServer?.close()
+    ]);
+
+    // Cleanup sockets
+    this.activeSockets.forEach(socket => socket.destroy());
+    this.activeSockets.clear();
+
+    // Aggressive emulator cleanup
+    if (this._emulator) {
+      // Stop the CPU
+      this._emulator.stop();
+      
+      // Clear the memory
+      if (this._emulator.wasm_memory) {
+        this._emulator.wasm_memory.free(); // Attempt to free WASM memory
+        this._emulator.wasm_memory = null;
+      }
+
+      // Destroy the emulator
+      this._emulator.destroy();
+      
+      // Clear all references
+      Object.keys(this._emulator).forEach(key => {
+        (this._emulator as any)[key] = null;
+      });
+      this._emulator = null;
+    }
+
+    // Clear all other references
+    this.server = undefined;
+    this.listeningServer = undefined;
+    this._serialConsole = null;
+
+    // Force a GC if available
+    if (global.gc) {
+      global.gc();
+    }
+    
+    console.log("=== PostgresMock Destroy Complete ===\n");
   }
 }
